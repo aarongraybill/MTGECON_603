@@ -1,0 +1,292 @@
+---
+title: "Problem Set 01"
+author: |
+  Aaron Graybill  
+  Collaborators: John Cho, Thomas Li, Blair Moore
+date: 2025-09-28
+output: 
+  bookdown::pdf_document2
+---
+
+If you're having trouble running my code, see https://github.com/aarongraybill/MTGECON_603
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F)
+```
+
+```{r}
+# Load useful libraries
+library(ggplot2) # making plots
+library(dplyr) # computing sum stats of data frames
+library(tidyr) # converting data from wide to long and vice versa
+```
+
+```{r}
+set.seed(1)
+df <- read.fwf('riverside_2025.txt', 
+               # each column is ten characters wide, there is no header
+               widths = rep(10, 8), header = F,
+               # assign column names
+               col.names = c("treated", "earnings_1", "earnings_4",
+                             "high_school", "female", "age", "young_child",
+                             "single"), 
+               # The last row is blank, so we only read the non-blank rows
+               n = 5419)
+```
+
+```{r}
+test_stat_mean_diff <- function(df){
+  mean(df$earnings_1[df$treated==1]) - mean(df$earnings_1[df$treated==0])
+}
+
+test_stat_median_diff <- function(df){
+  median(df$earnings_1[df$treated==1]) - median(df$earnings_1[df$treated==0])
+}
+
+test_stat_frac_above_zero <- function(df){
+  mean(df$earnings_1[df$treated==1] > 0) - mean(df$earnings_1[df$treated==0] > 0)
+}
+
+M <- sum(df$treated==1)
+N_SIMS <-  100000
+row_seq <- 1:nrow(df)
+sim_list <- 
+  lapply(1:N_SIMS, function(n){
+  # randomly re-order the rows
+  df_temp <- df[sample(row_seq),]
+  
+  # artificially assign M to treatment group based on random ranking
+  df_temp$treated <- 0
+  df_temp$treated[1:M] <- 1
+  
+  data.frame(
+    n = n,
+    test_stat_mean_diff = test_stat_mean_diff(df_temp),
+    test_stat_median_diff = test_stat_median_diff(df_temp),
+    test_stat_frac_above_zero = test_stat_frac_above_zero(df_temp)
+  )
+  
+})
+
+
+
+# assemble simulations into one dataset
+sim_df <- do.call(rbind, sim_list)
+
+true_df <-   data.frame(
+    test_stat_mean_diff = test_stat_mean_diff(df),
+    test_stat_median_diff = test_stat_median_diff(df),
+    test_stat_frac_above_zero = test_stat_frac_above_zero(df)
+  )
+
+# mean(abs(sim_df$test_stat_median_diff) > abs(true_df$test_stat_median_diff))
+# mean(abs(sim_df$test_stat_frac_above_zero) > abs(true_df$test_stat_frac_above_zero))
+
+```
+
+
+# Problem 1:
+
+## Problem 1.a:
+
+The test statistic from the 100,000 draws of the randomization distribution is
+1.14. This result is extremely significant as none of the 100,000 draws produced a
+value of the test statistic as extreme as the test statistic from the true assignments.
+Numerically, this means that the $p$-value is $0$, although with limitless computation,
+we would expect to see an extremely small, but positive value of the test statistic
+if we could fully compute each possible assignment vector. We can firmly reject
+the null hypothesis that the treatment has no effect.
+
+Figure \@ref(fig:mean-fixed-M) summarizes this graphically. The value of the test
+statistic from the actual assignments (the vertical line) is well outside the 
+values from the randomization distribution. I decided on 100,000 draws from the
+randomization distribution because it is a large enough number to explore many
+of the possible assignment vectors while still being small enough to be easily 
+computed without requiring additional computational infrastructure. 
+
+```{r mean-fixed-M, fig.cap="Randomization distribution and test statistic for difference in means."}
+# compute p-val
+mean_p_val <- mean(abs(sim_df$test_stat_mean_diff) > abs(true_df$test_stat_mean_diff))
+
+ggplot()+
+  geom_histogram(data = sim_df, aes(x=test_stat_mean_diff), bins = 100)+
+  geom_vline(data = true_df, aes(xintercept = test_stat_mean_diff))+
+  xlab("Test Stat")+
+  ylab("Count of Simulated Draws")+
+  annotate("text", x=true_df$test_stat_mean_diff, y = Inf,
+           label = paste0("t=", round(true_df$test_stat_mean_diff,2),", p=",mean_p_val),
+           vjust = 3, hjust = 1.5)
+```
+
+## Problem 1.b
+
+The previous exercise uses the difference in means. Figure \@ref(fig:median-fixed-M) 
+reports the test statistic and randomization distribution for the difference
+in medians between the treatment and control groups. Here, the $p$-value is non-zero
+because there are a few (negative) values from the randomization distribution
+that are more extreme than the observed test statistic of `r round(true_df$test_stat_median_diff,2)`. 
+The $p$-value is still 0.01649, which is still strongly significant, so the treatment
+does appear to have some impact on the difference in medians. 
+
+That said, I feel the difference in medians is an inferior test statistic in this
+case due to the prevalence of zeros in the distribution of incomes. In the
+data, the fraction of zero incomes after one year is `r mean(df$earnings_1==0)`.
+This means that in many of the draws from the randomization have a median of zero
+for both the treatment and control groups. While there's nothing inherently wrong
+about that, this choice of test statistics does not capture the interesting 
+variation in the data.
+
+```{r median-fixed-M, fig.cap="Randomization distribution and test statistic for difference in medians."}
+# compute p-val
+median_p_val <- mean(abs(sim_df$test_stat_median_diff) > abs(true_df$test_stat_median_diff))
+
+ggplot()+
+  geom_histogram(data = sim_df, aes(x=test_stat_median_diff), bins = 100)+
+  geom_vline(data = true_df, aes(xintercept = test_stat_median_diff))+
+  xlab("Test Stat")+
+  ylab("Count of Simulated Draws")+
+  annotate("text", x=true_df$test_stat_median_diff,
+           y = Inf, label = paste0("t=", round(true_df$test_stat_median_diff,2),", p=",median_p_val),vjust = 3, hjust = 2)
+```
+
+## Problem 1.c:
+
+An additional test statistic I found personally interesting was the difference
+in the share of zero-income individuals between treated and untreated groups.
+Because of the aforementioned mass at zero, one might worry that the treatment
+doesn't actually change the share of individuals making positive income and that
+it only changes income for those who would be employed either way. In particular,
+I define my test statistic to be:
+
+$$
+\frac{\sum_{Y_i=T} \mathbf{1}(earnings > 0)}{\sum_{Y_i=T}1} - \frac{\sum_{Y_i=C} \mathbf{1}(earnings > 0)}{\sum_{Y_i=C}1}
+$$
+
+Once again the test statistic is extremely significant, with $t=0.158$ and a $p$
+-value equal to approximately zero. Again there were no draws from the randomization
+distribution in which the value was more extreme that the observed value of the
+test statistic. This is readily apparent in figure \@ref(fig:frac-fixed-M)
+
+This provides strong evidence that the treatment had an effect on the fraction
+of individuals participating in the labor force.
+
+```{r frac-fixed-M, fig.cap="Randomization distribution and test statistic for difference in fractions greater than zero."}
+# compute p-val
+frac_p_val <- mean(abs(sim_df$test_stat_frac_above_zero) > abs(true_df$test_stat_frac_above_zero))
+
+ggplot()+
+  geom_histogram(data = sim_df, aes(x=test_stat_frac_above_zero), bins = 97)+
+  geom_vline(data = true_df, aes(xintercept = test_stat_frac_above_zero))+
+  xlab("Test Stat")+
+  ylab("Count of Simulated Draws")+
+  annotate("text", x=true_df$test_stat_frac_above_zero,
+           y = Inf, label = paste0("t=", round(true_df$test_stat_frac_above_zero,2),", p=",frac_p_val),vjust = 3, hjust = 2)
+```
+
+## Problem 1.d
+
+Table \@ref(tab:p-value-table) summarizes the p-values from the fixed-$M$ versus
+various bernoulli assignment probabilities. The question asks about $p=.8$, but
+to better illustrate the analysis I also report the results from additional
+simulations where $p=.5$ and $p=.99$. In each of those cases, I take $p$ to be
+the probability of assignment to the *treament* group. I choose this because the
+empirical fraction of treated is `r round(mean(df$treated),2)`, so $p=.8$ closely
+matches the empirical fraction of treated units. As the table shows, the $p$-values
+from the fixed-$M$ versus $p=.8$ are extremely similar. That's because the bernoulli
+assignments with similar balance closely mirror the fixed-$M$ case when there is
+such a large number of units.
+
+That said, the $p$-values are weakly lower (more signifcant) in the $p=.8$ column than
+under the fixed-$M$ computation.
+I believe $p=.8$ being slightly less than the empirical `r round(mean(df$treated),2)`
+means that the bernoulli trial is slightly more balanced (closer to $0.5$), and therefore has greater
+power, so a lower $p$-value.
+
+To further illustrate that point, I included the other columns for bernoulli
+assignments when $p=.5$ and $p=.99$. $p=.5$ maximizes power and therefore has the
+lowest $p$-values. $p=.99$ is extremely unbalanced and is unable to provide
+enough power to reject the null under most of the test statistics. This shows that 
+it may matter to use the bernoulli randomization distribution when the bernoulli
+assignment probability is quite different from the fixed-$M$ empirical fraction 
+or when the number of units is quite low. Neither of those cases apply when $p=.8$
+with more than 5,000 units, so there is not a strong (quanitative) reason to use
+one over another in our case.
+
+
+```{r}
+# here I run 3 types of simulations, for different values of "weightedness"
+# in the coin flip to compare how balance in the simulated panel affects things
+sim_list_bernoulli <- lapply(c(.5, .8, .99), function(f) {
+  lapply(1:N_SIMS, function(n) {
+    # create a temp copy of the data
+    df_temp <- df
+    
+    # artificially assign to treatment by flipping weighted coin
+    df_temp$treated <- ifelse(runif(nrow(df_temp)) < f, 1, 0)
+    
+    temp_m <- sum(df_temp$treated)
+    
+    data.frame(
+      n = n,
+      test_stat_mean_diff = test_stat_mean_diff(df_temp),
+      test_stat_median_diff = test_stat_median_diff(df_temp),
+      test_stat_frac_above_zero = test_stat_frac_above_zero(df_temp),
+      f = f
+    )
+  })
+})
+
+
+
+
+# assemble simulations into one dataset
+sim_df_bernoulli <- do.call(rbind, do.call(rbind, sim_list_bernoulli))
+
+true_df <-   data.frame(
+    test_stat_mean_diff = test_stat_mean_diff(df),
+    test_stat_median_diff = test_stat_median_diff(df),
+    test_stat_frac_above_zero = test_stat_frac_above_zero(df),
+    f = mean(df$treated)
+  )
+```
+
+```{r p-value-table, tab.cap="Table of p-Values from various Fisher Exact Tests. Fixed M corresponds to the p-values from a fixed number of treated units. Columns with p= correspond to bernoulli simulations where the number of treated units varies randomly according to the stated probabilities. Rows correspond to the test statistic in question."}
+bernoulli_comparison_df <- 
+  sim_df_bernoulli |> 
+  select(-n) |> 
+  tidyr::pivot_longer(-f, names_to = "test_stat", values_to = "simulated_value", names_prefix = "test_stat_") |> 
+  left_join(true_df |> 
+              tidyr::pivot_longer(everything(), names_to = "test_stat", values_to = "true_value", names_prefix = "test_stat_")) |> 
+  summarize(p_val = mean(abs(simulated_value) > abs(true_value)), .by = c(f, test_stat)) |> 
+  tidyr::pivot_wider(names_from = "f", values_from = "p_val", names_prefix = "p=")
+
+fixed_M_comparison_df <- 
+  sim_df |> 
+  select(-n) |> 
+  tidyr::pivot_longer(everything(), names_to = "test_stat", values_to = "simulated_value", names_prefix = "test_stat_") |> 
+  left_join(true_df |> 
+              tidyr::pivot_longer(everything(), names_to = "test_stat", values_to = "true_value", names_prefix = "test_stat_")) |> 
+  summarize(p_val = mean(abs(simulated_value) > abs(true_value)), .by = c(test_stat)) |> 
+  rename(`Fixed M`=p_val)
+
+left_join(fixed_M_comparison_df, bernoulli_comparison_df) |> 
+  rename(`Test Stat` = test_stat) |> 
+  knitr::kable()
+```
+
+# Problem 2:
+
+In this case, I would suggest treating the experiment as though the 49 treated
+units was non-random, despite the coin flipping. The outcome of 49 treated units
+was extremely typical after flipping a coin 100 times, and there are many possible
+assignment vectors with 49 units treated, so the randomization distribution should
+be able to capture lots of possible scenarios. While the Bernoulli $p=.5$ is 
+slightly more balanced than the observed $M=49/100$ and may result in slightly
+lower $p$-values, this result is likely to be neglible given how close
+49 is to the maximally balanced 50. Furthermore,
+with 100 total units, there are probably enough units for Bernoulli assignments to
+not play a meaningful role in the total number of assignments.
+
+One might consider using the Bernoulli assignments if the number of units was
+smaller and number of treated individuals is extremely unbalanced, then the bernoulli
+assignments might increase the power and more accurately capture the variation.

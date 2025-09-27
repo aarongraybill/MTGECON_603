@@ -1,0 +1,5 @@
+# Mac Ignorables:
+.DS_Store
+
+# User Level Configs:
+.Rproj.user
