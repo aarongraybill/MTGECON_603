@@ -3,3 +3,6 @@
 
 # User Level Configs:
 .Rproj.user
+
+# User Command History
+.Rhistory

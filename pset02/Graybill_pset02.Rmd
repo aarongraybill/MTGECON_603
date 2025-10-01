@@ -1,0 +1,35 @@
+---
+title: "Problem Set 02"
+author: |
+  Aaron Graybill  
+  Collaborators: John Cho, Thomas Li, Blair Moore
+date: 2025-10-5
+output: 
+  bookdown::pdf_document2
+---
+
+If you're having trouble running my code, see https://github.com/aarongraybill/MTGECON_603
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = F)
+```
+
+```{r}
+# Load useful libraries
+library(ggplot2) # making plots
+library(dplyr) # computing sum stats of data frames
+library(tidyr) # converting data from wide to long and vice versa
+```
+
+```{r}
+set.seed(1)
+df <- read.fwf('riverside_2025.txt', 
+               # each column is ten characters wide, there is no header
+               widths = rep(10, 8), header = F,
+               # assign column names
+               col.names = c("treated", "earnings_1", "earnings_4",
+                             "high_school", "female", "age", "young_child",
+                             "single"), 
+               # The last row is blank, so we only read the non-blank rows
+               n = 5419)
+```
