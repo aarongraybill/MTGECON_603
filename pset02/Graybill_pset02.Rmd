@@ -5,13 +5,28 @@ author: |
   Collaborators: John Cho, Thomas Li, Blair Moore
 date: 2025-10-5
 output: 
-  bookdown::pdf_document2
+  bookdown::pdf_document2:
+    extra_dependencies: ["float", "flafter"]
+    header_includes:
+      - \usepackage{float}
+      - \floatplacement{table}{H}
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
-If you're having trouble running my code, see https://github.com/aarongraybill/MTGECON_603
+If you're having trouble running my code, see
+<https://github.com/aarongraybill/MTGECON_603>. Also the spacing on the tables
+text are really not ideal, Rmarkdown and LateX are not playing nicely, sorry about
+that!
 
 ```{r, echo=FALSE}
-knitr::opts_chunk$set(echo = FALSE, message = F)
+# don't print code by default
+knitr::opts_chunk$set(echo = FALSE, message = F,tab.pos = "[H]",
+                      fig.pos = "H",fig.align='center',
+                      out.extra = "")
+# force figure positioning
+#knitr::opts_chunk$set()
 ```
 
 ```{r}
@@ -33,3 +48,679 @@ df <- read.fwf('riverside_2025.txt',
                # The last row is blank, so we only read the non-blank rows
                n = 5419)
 ```
+
+```{r neyman-functions}
+compute_neyman_point <- function(y, treated){
+  y_treated <- y[treated == 1]
+  y_control <- y[treated == 0]
+  # mean automatically takes care of dividing by N
+  d <- mean(y_treated) - mean(y_control)
+  return(d)
+}
+
+compute_empirical_variance <- function(y){
+  # here we divide by length of the vector minus explicitly
+  (1/(length(y)-1)) * sum((y - mean(y))^2)
+}
+
+compute_neyman_variance <- function(y, treated){
+  # compute the conservative Neyman variance
+  N <- length(y)
+  M <- sum(treated)
+  y_treated <- y[treated == 1]
+  y_control <- y[treated == 0]
+  S_T <- compute_empirical_variance(y_treated)
+  S_C <- compute_empirical_variance(y_control)
+  return((S_T/(M)) + (S_C/(N-M)))
+}
+
+compute_neyman_conf_interval <- function(y, treated, p = .90){
+  t_hat <- compute_neyman_point(y, treated)
+  V_hat <- compute_neyman_variance(y, treated)
+  
+  # here we multiply by negative one bc (1-.9)/2=.05, which is a negative
+  # value in the CDF, we flip the sign just to make the CI more natural
+  pctile <- -qnorm(p = (1-p)/2)
+  
+  # point +/- std. dev. * critical value
+  lb = t_hat - (sqrt(V_hat) * pctile)
+  ub = t_hat + (sqrt(V_hat) * pctile)
+  
+  # return as a 1-row data frame (tibble) for R specific reasons that will
+  # make it easier later to aggregate results
+  return(
+    tibble(lb = lb, ub = ub)
+    )
+}
+```
+
+```{r ols-functions}
+# apply formulas from lecture notes
+compute_ols_beta <- function(y, treated){
+  N <- length(y)
+  W_bar <- mean(treated)
+  Y_bar <- mean(y)
+  numerator <- (1/N) * sum((treated - W_bar)*(y-Y_bar))
+  denominator <- (1/N) * sum((treated-W_bar)^2)
+  
+  return(numerator / denominator)
+}
+
+# use the estimate of beta_hat to compute alpha_hat
+compute_ols_alpha <- function(y, treated){
+  W_bar <- mean(treated)
+  Y_bar <- mean(y)
+  beta_hat <- compute_ols_beta(y, treated)
+  
+  return(Y_bar - (beta_hat * W_bar))
+}
+
+compute_ols_residuals <- function(y, treated){
+  beta_hat <- compute_ols_beta(y, treated)
+  alpha_hat <- compute_ols_alpha(y, treated)
+  
+  return(y - alpha_hat - (beta_hat * treated))
+}
+
+# use formula from lecture notes
+compute_ols_variance <- function(y, treated){
+  N <- length(y)
+  M <- sum(treated)
+  sigma_sq_hat <- (1/(N-2)) * sum(compute_ols_residuals(y, treated)^2)
+  denominator <- N * (M/N) * (1 - (M/N))
+  
+  return(sigma_sq_hat / denominator)
+}
+
+# constructed almost identical to Neyman CI, just using the formulas for OLS
+compute_ols_conf_interval <- function(y, treated, p = .90){
+  beta_hat <- compute_ols_beta(y, treated)
+  V_hat <- compute_ols_variance(y, treated)
+  
+  pctile <- -qnorm(p = (1-p)/2)
+  
+  lb = beta_hat - (sqrt(V_hat) * pctile)
+  ub = beta_hat + (sqrt(V_hat) * pctile)
+  
+  return(
+    tibble(lb = lb, ub = ub)
+    )
+}
+
+```
+
+# Problem 1.
+
+## Problem 1.a.
+
+Table \@ref(tab:no-strata-table) summarizes the results from the Neyman
+and OLS estimates for the post-treatment one and four year earnings. The
+estimates for Neyman versus OLS are quite similar given the large $N$.
+In every case, the 90% confidence intervals do not contain zero which
+indicates that the treatment had a significant average treatment effect
+on this population.
+
+```{r no-strata-table, tab.cap="Summary of Neyman and OLS point estimates, variances, and confidence intervals for one and four year earnings post-treatment."}
+
+# This function accepts a dataframe and a dependent variable and returns the 
+# Neyman estimates as a summary dataframe
+compute_neyman_sum_stats <- function(df, var){
+  # this just captures the variable name so we can add it to the resulting
+  # dataframe
+  outcome_var <- deparse(substitute(var))
+  
+  df |> 
+  reframe(
+    method = "Neyman",
+    outcome_var = outcome_var,
+    n = n(),
+    point = compute_neyman_point({{ var }}, treated),
+    variance = compute_neyman_variance({{ var }}, treated),
+    compute_neyman_conf_interval({{ var }}, treated)
+  )
+}
+
+# same as above function, just using OLS sum stats
+compute_ols_sum_stats <- function(df, var){
+  outcome_var <- deparse(substitute(var))
+  
+  df |> 
+  reframe(
+    method = "OLS",
+    outcome_var = outcome_var,
+    n = n(),
+    point = compute_ols_beta({{ var }}, treated),
+    variance = compute_ols_variance({{ var }}, treated),
+    compute_ols_conf_interval({{ var }}, treated)
+  )
+}
+
+# here we compute 4 sum stat tables and append them for the 2 methods x 2 dep vars.
+bind_rows(
+compute_neyman_sum_stats(df, earnings_1),
+compute_neyman_sum_stats(df, earnings_4),
+compute_ols_sum_stats(df, earnings_1),
+compute_ols_sum_stats(df, earnings_4)
+) |> knitr::kable()
+  
+```
+
+\newpage
+
+## 1.b.
+
+When you stratify the data by high school completion and whether or not
+the subject has a young child and re-estimate the point estimates and
+variances, there are a couple things of note. Table
+\@ref(tab:strata-table) summarizes these results. Of course, each of the
+different strata have different point estimates and variances. Part of
+the difference in variance comes from the different population size in
+each stratum, but part of the difference in variance comes from the
+different groups empirically having different characteristics.
+
+```{r strata-table, tab.cap="Table of Neyman average treatment effects and variances for one and four year post-treatment earnings stratified by combinations of highs chool completion and the presence of children under 6."}
+
+# If you "group" a data frame, 
+# dplyr is smart enough to automatically apply subsequent functions to each of
+# those groups separately, so we can reuse the syntax from before
+group_df <- df |> group_by(young_child, high_school)
+
+bind_rows(
+compute_neyman_sum_stats(group_df, earnings_1),
+compute_neyman_sum_stats(group_df, earnings_4),
+) |> 
+  # don't need the confidence intervals here:
+  select(-ub, -lb) |> 
+  # compute standard error as sqrt of variance:
+  mutate(sd = sqrt(variance)) |> 
+  knitr::kable()
+```
+
+\newpage
+
+## 1.c.
+
+Finally table \@ref(tab:strata-combined-table) aggregates the statistics
+in table \@ref(tab:strata-table) according to the appropriate
+aggregation for the respective summary statistics. Of course, the
+population size `n_tot` can simply be summed across the strata. The
+`point` column, the Neyman ATE point estimate, is the weighted average
+of each point estimates. Just to fix notation, index the strata
+$g\in\{1,\ldots,G\}$. Denote the size of each stratum $N_g$. I compute
+the aggregate point estimate with:
+
+$$
+\sum_{g=1}^G\frac{N}{N_g}\hat\tau_g
+$$
+
+Where $\hat\tau_g$ is the estimated ATE for each stratum.
+
+To aggregate the variances, I use:
+
+$$
+\sum_{g=1}^G\left(\frac{N}{N_g}\right)^2\hat\nu_g
+$$ Where $\hat\nu_g$ is the estimated stratum level variance.
+
+Comparing the variances in part 1.a. to part 1.c., we can see that the
+variance slightly increased when aggregating strata for 1 year earnings.
+Since we did not
+
+```{r strata-combined-table, tab.cap="Table of Neyman average treatment effects and variances for one and four year post-treatment earnings combined across strata of combinations of highs chool completion and the presence of children under 6."}
+
+# The same aggregations and sum stats as before, but now we just aggregate
+# those stratum-level estimates into a population level estimate (with
+# appropriate weighting)
+bind_rows(
+compute_neyman_sum_stats(group_df, earnings_1),
+compute_neyman_sum_stats(group_df, earnings_4),
+#compute_ols_sum_stats(group_df, earnings_1),
+#compute_ols_sum_stats(group_df, earnings_4)
+) |> 
+  summarize(
+    n_tot = sum(n),
+    point = sum((n/sum(n)) * point),
+    var = sum(((n/sum(n))^2) * variance),
+    sd = sqrt(sum(((n/sum(n))^2) * variance)),
+    .by = c(method, outcome_var)
+  ) |> 
+  knitr::kable()
+```
+
+\newpage
+
+# Problem 2
+
+## 2.a
+
+We showed in class and in the lecture notes that the estimator for the
+average treatment effect is also an unbiased estimator for the average
+treatment effect for the treated (ATT). Let's compute the variance of
+the ATE estimator around the (stochastic) ATT estimand.
+
+That is:
+
+$$
+\mathbb{V}_\mathbf{W}[\hat\tau-\tau_t]
+$$
+
+Where $\mathbf{W}$ denote the random stochastic assignment vector and
+$\tau_t$ is the stochastic estimand.
+
+Using the alternate variance formula, we can express the desired
+variance as:
+
+$$
+\mathbb{V}_\mathbf{W}[\hat\tau-\tau_t]=\mathbb{E}_\mathbf{W}[(\hat\tau-\tau_t)^2]-\mathbb{E}_\mathbf{W}[(\hat\tau-\tau_t)]^2
+$$
+
+Since the estimator $\hat\tau$ is unbiased for $\tau_t$, that second
+term is $0^2=0$.
+
+So computing the variance reduces to $\mathbb{E}[(\hat\tau-\tau_t)^2]$.
+Expanding relevant definitions, we have:
+
+$$
+\mathbb{E}_\mathbf{W}\left[\left(\frac{1}{M}\sum_{i=1}^N W_iY_i(T)-\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(C)-\frac{1}{M}\sum_{i=1}^NW_i(Y_i(T)-Y_i(C))\right)^2\right]
+$$
+
+We can do some cancellation
+
+\begin{align*}
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{1}{M}\sum_{i=1}^N W_iY_i(T)-\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(C)-\frac{1}{M}\sum_{i=1}^NW_i(Y_i(T)-Y_i(C))\right)^2\right]\\
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{1}{M}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(C)\right)^2\right]\\
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{1}{M}\sum_{i=1}^N W_iY_i(C)+\frac{1}{N-M}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2\right]\\
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{(N-M) + M}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2\right]\\
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2\right]\\
+&\mathbb{E}_\mathbf{W}\left[\left(\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2\right]\\
+\end{align*}
+
+Using the alternate form of variance but now with
+$\mathbb{V}[X]+\mathbb{E}[X]^2=\mathbb{E}^2[X]$, we can decompose the
+expression above into:
+
+$$
+\mathbb{V}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right] +
+\mathbb{E}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right]^2
+$$
+
+I will now argue that
+$\mathbb{E}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right]^2=0$.
+Using the linearity of expectation, we have:
+
+$$
+\left(\mathbb{E}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)\right]-\mathbb{E}_{\mathbf{W}}\left[\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right]\right)^2
+$$
+
+Pulling the constants out:
+
+$$
+\left(\frac{N}{M(N-M)}\mathbb{E}_{\mathbf{W}}\left[\sum_{i=1}^N W_iY_i(C)\right]-\frac{1}{N-M}\mathbb{E}_{\mathbf{W}}\left[\sum_{i=1}^NY_i(C)\right]\right)^2
+$$
+
+Noting that $W_i\perp Y_i(C)$, we can see that the second term is
+non-stochastic, so we must have:
+
+$$
+\left(\frac{N}{M(N-M)}\mathbb{E}_{\mathbf{W}}\left[\sum_{i=1}^N W_iY_i(C)\right]-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2
+$$
+
+Similary since $W_i\perp Y_i(C)$, we can bring the expectation inside
+the summation to get:
+
+$$
+\left(\frac{N}{M(N-M)}\sum_{i=1}^N \mathbb{E}_{\mathbf{W}}[W_i]Y_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2
+$$
+
+Across all of the realizations of $\mathbf{W}$, a given $W_i$ is
+selected with probability $M/N$, so we have:
+
+$$
+\left(\frac{N}{M(N-M)}\sum_{i=1}^N \frac{M}{N}Y_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2=\left(\frac{1}{N-M}\sum_{i=1}^N Y_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right)^2=0
+$$
+
+So all that's left is to compute:
+
+$$
+\mathbb{V}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)-\frac{1}{N-M}\sum_{i=1}^NY_i(C)\right]
+$$
+
+Once again, assignments are orthogonal to outcomes, so the second term
+is non-varying in $Y$ and doesn't contribute to variance. So we are left
+with:
+
+$$
+\mathbb{V}_{\mathbf{W}}\left[\frac{N}{M(N-M)}\sum_{i=1}^N W_iY_i(C)\right]
+$$
+
+With the remaining sum, we need to to take seriously the covariances
+between the $W_i$'s, so the sum reduces to:
+
+$$
+\frac{N^2}{M^2(N-M)^2}\left(\sum_{i=1}^N \mathbb{V}_{\mathbf{W}}[W_i]Y_i(C)^2+\sum_{i=1}^N\sum_{j\neq i}^N\mathbb{C}(W_i,W_j)\cdot Y_i(C) \cdot Y_j(C)\right)
+$$
+
+Where i'm using the same orthogonality trick from before to pull the
+$Y$s out of the variances and covariances.
+
+Over all the samples, the assignments have the same variance as a
+bernoulli assignment probabilities, so the variance of any individual
+$\mathbb{V}_{\mathbf{W}}[W_i]=\frac{M}{N}\cdot\left(1-\frac{M}{N}\right)$.
+
+But for reasons that will be obvious in a moment it's more convenient to
+pull out a factor of $1/N$ from the second term giving:
+$\frac{M}{N^2}\cdot\left(N-M\right)$.
+
+Plugging that back in we get:
+
+$$
+\frac{N^2}{M^2(N-M)^2}\left(\sum_{i=1}^N \frac{M}{N^2}\cdot\left(N-M\right)Y_i(C)^2+\sum_{i=1}^N\sum_{j\neq i}^N\mathbb{C}(W_i,W_j)\cdot Y_i(C) \cdot Y_j(C)\right)
+$$
+
+Thinking about the covariances between every distinct $i$ and $j$, we
+can use the alternate formula for covariance that's:
+
+$$
+\mathbb{E}[W_iW_j]-\mathbb{E}[W_i]\mathbb{E}[W_j]=\mathbb{E}[W_iW_j]-\frac{M}{N}\cdot\frac{M}{N}=\frac{M}{N}\cdot\frac{M-1}{N-1}-\frac{M}{N}\cdot\frac{M}{N}=\frac{M}{N}\left(\frac{M-1}{N-1}-\frac{M}{N}\right)
+$$
+
+One final simplification gives:
+
+$$
+\frac{M}{N}\left(\frac{M-1}{N-1}-\frac{M}{N}\right)=\frac{M}{N}\left(\frac{(MN-N)-(MN-M)}{N(N-1)}\right)=-\frac{M}{N^2}\cdot\frac{N-M}{N-1}
+$$
+
+Plugging that back in we have:
+
+$$
+\frac{N^2}{M^2(N-M)^2}\left(\sum_{i=1}^N \frac{M}{N^2}\cdot\left(N-M\right)Y_i(C)^2-\sum_{i=1}^N\sum_{j\neq i}^N\frac{M}{N^2}\cdot\frac{N-M}{N-1}\cdot Y_i(C) \cdot Y_j(C)\right)
+$$ Then we have some nice cancellation giving:
+
+$$
+\frac{1}{M(N-M)}\left(\sum_{i=1}^N Y_i(C)^2-\frac{1}{N-1}\sum_{i=1}^N\sum_{j\neq i}^N Y_i(C) \cdot Y_j(C)\right)
+$$
+
+Pulling out a factor for $\frac{1}{N-1}$, we have:
+
+$$
+\frac{1}{M(N-M)(N-1)}\left((N-1)\sum_{i=1}^N Y_i(C)^2-\sum_{i=1}^N\sum_{j\neq i}^N Y_i(C) \cdot Y_j(C)\right)
+$$
+
+Now adding and subtracting a $\sum_{i=1}^N Y_i(C)^2$, we have:
+
+$$
+\frac{1}{M(N-M)(N-1)}\left(N\sum_{i=1}^N Y_i(C)^2-\sum_{i=1}^N\sum_{j\neq i}^N Y_i(C) \cdot Y_j(C) - \sum_{i=1}^N Y_i(C)^2\right)
+$$
+
+Note that
+$\left(\sum_i^NY_i(C)\right)^2=\sum_i^N Y_i(C)^2+\sum_i^N\sum_{j\neq i}Y_i(C)Y_j(C)$
+(just expanding out the quadratic form). Plugging that identity in, we
+have:
+
+$$
+\frac{1}{M(N-M)(N-1)}\left(N\sum_{i=1}^N Y_i(C)^2-\left(\sum_i^NY_i(C)\right)^2\right)
+$$ Noting that $\sum_i^NY_i(C)=N\overline{Y}^{obs}$, we have:
+
+$$
+\frac{1}{M(N-M)(N-1)}\left(N\sum_{i=1}^N Y_i(C)^2-N^2{\overline{Y}^{obs}}^2\right)=\frac{N}{M(N-M)(N-1)}\left(\sum_{i=1}^N Y_i(C)^2-N{\overline{Y}^{obs}}^2\right)
+$$ Noting that summing something $N$ times is the same as multiplying by
+$N$, we have:
+
+$$
+\frac{N}{M(N-M)(N-1)}\left(\sum_{i=1}^N Y_i(C)^2-\sum_{i=1}^N{\overline{Y}^{obs}}^2\right)
+$$
+
+Collecting into the sum:
+
+$$
+\frac{N}{M(N-M)(N-1)}\left(\sum_{i=1}^N\left( Y_i(C)^2-{\overline{Y(C)}}^2\right)\right)
+$$ Using the same algerba that makes,
+$\mathbb{E}[(X^2-\mathbb{E}[X])^2]=\mathbb{E}[X^2]-\mathbb{E}[X]^2$, we
+know that:
+
+$$
+\sum_{i=1}^N\left( Y_i(C)^2-{\overline{Y(C)}}^2\right)=\sum_{i=1}^N \left(Y_i(C)-{\overline{Y(C)}}\right)^2
+$$
+
+Leaving us with:
+
+$$
+\frac{N}{M(N-M)}\frac{1}{N-1}\sum_{i=1}^N \left(Y_i(C)-{\overline{Y(C)}}\right)^2
+$$ and finally using the definition of $S_C^2$, we have that the final
+answer is:
+
+$$
+\frac{N}{M(N-M)}S_C^2
+$$ 
+
+Knowing from the lectures that (lowercase) $s_C^2$ is an unbiased
+estimator for (uppercase) $S_C^2$, then a multiple of $s_C^2$ will be an
+unbiased estimator for a multiple of $S_C^2$. Namely, our estimator will
+be:
+
+$$
+\frac{N}{M(N-M)}s_C^2
+$$
+
+## 2.b.
+
+I'll quickly show that $\hat\tau$ is an unbiased estimator for $\tau_c$,
+the ATU.
+
+To show unbiasedness, we must show that $\mathbb{E}[\hat\tau-\tau_c]=0$.
+Following the notes from section on 10/3, we proceed as follows:
+
+\begin{align*}
+\mathbb{E}_{\mathbf{W}}[\hat\tau-\tau_c]&=
+\mathbb{E}_{\mathbf{W}}\left[\frac{1}{M}\sum_{i=1}^NW_iY_i -\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i -\frac{1}{N-M}\sum_{i=1}^N(1-W_i)(Y_i(T)-Y_i(C))\right] \\\\
+&=\mathbb{E}_{\mathbf{W}}\left[\frac{1}{M}\sum_{i=1}^NW_iY_i(T) -\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(C) -\frac{1}{N-M}\sum_{i=1}^N(1-W_i)(Y_i(T)-Y_i(C))\right]\\
+&=\mathbb{E}_{\mathbf{W}}\left[\frac{1}{M}\sum_{i=1}^NW_iY_i(T)  -\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(T)\right]\\
+&=\mathbb{E}_{\mathbf{W}}\left[\frac{1}{M}\sum_{i=1}^NW_iY_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T)+\frac{1}{N-M}\sum_{i=1}^NW_iY_i(T)\right]\\
+&=\mathbb{E}_{\mathbf{W}}\left[\left(\frac{1}{M}+\frac{1}{N-M}\right)\sum_{i=1}^NW_iY_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T)\right]\\
+&=\mathbb{E}_{\mathbf{W}}\left[\left(\frac{N}{N-M}\right)\sum_{i=1}^NW_iY_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T)\right]\\
+&=\left(\frac{N}{M(N-M)}\right)\sum_{i=1}^N\mathbb{E}_{\mathbf{W}}[W_i]Y_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T) \\
+&=\left(\frac{N}{M(N-M))}\right)\sum_{i=1}^N\frac{M}{N}Y_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T)\\
+&=\frac{1}{N-M}\sum_{i=1}^NY_i(T)  -\frac{1}{N-M}\sum_{i=1}^NY_i(T)\\
+&=0
+\end{align*}
+
+Then, a symmetric argument to the one in 2.a. shows that the true variance of the estimator, $\mathbb{V}_{\mathbf{W}}[\hat\tau-\tau_c]$, would be $\frac{N}{M(N-M)}S_T^2$ with 
+unbiased estimator $\frac{N}{M(N-M)}s_T^2$
+
+## 2.c.
+
+I don't have a complete answer for this, and I'm not 100% sure about what it's
+asking. If it's asking for the variance of the true ATE, that would be zero
+(on the full sample, there is only one ATE), but if it's asking for the variance
+of the ATE estimator, $\mathbb{V}_{\mathbf{W}}[\hat\tau]$, I would note that we've
+already proven that $\mathbb{V}_{\mathbf{W}}[\hat\tau]=\frac{S^2_C}{N-M}+\frac{S_T^2}{M}-\frac{S_{CT}^2}{N}$, and given the variances from ATT and ATU, we still cannot estimate the $S_{CT}^2$ term,
+but if you're happy to make the conservative estimate that ignores $S_{CT}^2$, you could use:
+
+\begin{align*}
+\mathbb{V}_{\mathbf{W}}[\hat\tau]&\leq\frac{\frac{M(N-M)}{N}\mathbb{V}_\mathbf{W}[\hat\tau-\tau_c]}{N-M}+\frac{\frac{M(N-M)}{N}\mathbb{V}_\mathbf{W}[\hat\tau-\tau_t]}{M}\\
+&=\frac{M}{N}\mathbb{V}_\mathbf{W}[\hat\tau-\tau_c]+\frac{N-M}{N}\mathbb{V}_\mathbf{W}[\hat\tau-\tau_t]
+\end{align*}
+
+# 2.a Graveyard
+
+**You don't have to read this, but this was my attempted derivation of
+for the variance of** $\tau_t$. I just have to leave it here for my
+sanity.
+
+The average effect for the treated for a given realization of the
+assignment vector is given by:
+
+$$
+\tau_t = \frac{1}{M}\sum_{i=1}^N\mathbf{1}_{W_i=1}(Y_i(T)-Y_i(C))
+$$
+
+The true variance for those assignments would be:
+
+$$
+\frac{1}{M}\sum_{i=1}^N (\mathbf{1}_{W_i=1}(Y_i(T)-Y_i(C))-\tau_t)^2
+$$
+
+Denote $\tau_t$ as the random variable corresponding to the $ATT$ across
+the possible assignment vectors. Further let $\mathbf{W}$ be the random
+variable corresponding to the different possible assignment vectors. By
+the law of total variance, we can express $\mathbb{V}[\tau_t]$ as:
+
+$$
+\mathbb{V}[\tau_t]=\mathbb{E}[\mathbb{V}[\tau_{t}\vert\mathbf{W}]]+\mathbb{V}[\mathbb{E}[\tau_{t}\vert\mathbf{W}]]
+$$
+
+Consider the quantity $\mathbb{V}[\tau_t\vert\mathbf{W}]$. I will argue
+that this quantity must be zero, no matter the realization of
+$\mathbf{W}$. For any given realization of the assignment vector, there
+is only one possible value of $\tau_t$ (the average treatment effect for
+those treated under those assignments). Since there's only one possible
+value for $\tau_t$, the conditional variance must be zero.
+
+Therefore, the expected value of the variance across realizations of
+$\mathbf{W}$ must be zero ($E[0]=0$).
+
+That said, the second part of the above summation will not, in all
+likelihood, be zero. The quantity $\mathbb{E}[\tau_t\vert\mathbf{W}]$,
+while uniquely determined by a specific realization of $\mathbf{W}$, is
+a random variable that can take multiple values depending on the
+realizaton of the assignment vector. So to compute the variance over
+that expectation, we can use the definition of variance:
+
+By the alternate definition of variance, we have that:
+
+\begin{align*}
+\mathbb{V}[\mathbb{E}[\tau_t\vert\mathbf{W}]]&=\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]^2]-\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]^2
+\end{align*}
+\begin{align*}
+\mathbb{V}[\mathbb{E}[\tau_t\vert\mathbf{W}]]&=\mathbb{E}[(\mathbb{E}[\tau_t\vert\mathbf{W}]-\tau)^2]
+\end{align*}
+
+for the second part of that difference,
+$\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]^2$, it's relatively
+straightfoward to see that
+$\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]^2=\tau^2$ (where $\tau$
+is the non-stochastic average treatment across across both treated and
+control units.) To see this, notice that the outer expectation is over
+assignments, which are all equally likely with probability
+$1/\binom{N}{M}$, so we can express the expectation as:
+
+\begin{align*}
+\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]&=\sum_{W\in\Omega(\mathbf{W})}\frac{1}{\binom{N}{M}}\mathbb{E}[\tau_t\vert\mathbf{W}=W]\\
+&=\frac{1}{\binom{N}{M}}\sum_{W\in\Omega(\mathbf{W})}\mathbb{E}[\tau_t\vert\mathbf{W}=W]
+\end{align*}
+
+Those inner expectations are somewhat tricky to say anything about
+individually, but one thing we can say is that once we have conditioned
+on a particular $W$, there is only one possible value of $\tau_t$ and it
+occurs with probability 1. So it's not really an expectation, it's just
+whatever the value of $\tau_t$ is for that assignment vector. Each
+individual $\tau_t$ is just an average of the differences for treated
+groups, $\frac{1}{M}\sum_i W_i (Y_i(T)-Y_i(C))$.
+
+Factoring out the shared $1/M$, we can rewrite
+$\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]^2$ as:
+
+$$
+\frac{1}{\binom{N}{M}}\cdot\frac{1}{M}\cdot\sum_{W\in\Omega(\mathbf{W})}\sum_i W_i (Y_i(T)-Y_i(C))
+$$
+
+Another nice feature of the sum above is that every outcome,
+$Y_i(T)-Y_i(C)$, is treated exactly the same number of times across the
+possible values of $\mathbf{W}$. Since there are $\binom{N}{M}$ total
+realization vectors, and each vector has $M$ total treatments, there are
+$M\cdot\binom{N}{M}$ total treatments across all assignment vectors.
+Since those treatments are occur evenly between all $N$ participants, we
+must have that each $i$ is treated $\frac{M\cdot\binom{N}{M}}{N}$ times.
+So instead of the nested summation, we can just say that each
+$Y_i(T)-Y_i(C)$ appears exactly $\frac{M\cdot\binom{N}{M}}{N}$. So that
+is:
+
+\begin{align*}
+\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]&=\frac{1}{\binom{N}{M}}\cdot\frac{1}{M}\cdot\frac{M\cdot\binom{N}{M}}{N}\cdot\sum_i (Y_i(T)-Y_i(C))\\
+&=\frac{1}{N}\sum_i (Y_i(T)-Y_i(C))\\
+&=\tau
+\end{align*}
+
+Beautiful, yet unsurprising. The expected average treatment effect for
+the treated is the true $\tau$, so
+$\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]]]^2=\tau^2$.
+
+Now for $\mathbb{E}[\mathbb{E}[\tau_t\vert\mathbf{W}]^2]$. Consider an
+arbitrary $W\in\Omega{\mathbf{W}}$.
+
+It's value for $\mathbb{E}[\tau_t\vert\mathbf{W}=W]^2$ would be
+something of the form:
+
+$$
+\left(\frac{1}{M}\sum_iW_i\cdot(Y_i(T)-Y_i(C))\right)^2=\frac{1}{M^2}\left(\sum_iW_i\cdot(Y_i(T)-Y_i(C))\right)^2
+$$
+
+For a specific realization of $W$, that squared sum would be of the
+form:
+
+$$
+\left(\sum_iW_i\cdot(Y_i(T)-Y_i(C))\right)^2=\sum_{i:W_i=1}(Y_i(T)-Y_i(C))^2+\sum_{i:W_i=1}\sum_{j> i:W_i=1}2\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))
+$$
+
+There, all I have done is decompose the sum into its own terms and cross
+terms. The $j>i$ is accounting for the fact that each pair of items
+should only appear once in that sum. So we can have a term for
+$(i=1,j=2)$, but not simultaneously $(i=2, j=1)$ because we would
+collect those into the same term.
+
+Now we try to think to think about what happens over the various
+realizations of $W\in\Omega(\mathbf{W})$. Similar to the logic from
+before, each realization of the assignment vector, $W$ has equal
+probability with $1/\binom{N}{M}$. So the unconditional expected value
+is something of the form:
+
+$$
+\frac{1}{\binom{N}{M}}\sum_{W\in\Omega(\mathbf{W})}\left[\sum_{i:W_i=1}(Y_i(T)-Y_i(C))^2+\sum_{i:W_i=1}\sum_{j> i:W_i=1}2\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))\right]
+$$
+
+We can separate that into separate sums for the own vs cross terms like
+follows:
+
+$$
+\frac{1}{\binom{N}{M}}\sum_{W\in\Omega(\mathbf{W})}\left[\sum_{i:W_i=1}(Y_i(T)-Y_i(C))^2\right]+\frac{1}{\binom{N}{M}}\sum_{W\in\Omega(\mathbf{W})}\left[\sum_{i:W_i=1}\sum_{j\neq i:W_i=1}2\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))\right]
+$$
+
+Starting with the first part of that sum, we're in a very similar case
+to before. Each inidividual $i$, must appear exactly
+$\frac{\binom{N}{M}M}{N}$ times across all of the inner summations and
+realizations of the assignment vectors. So we can replace that first sum
+with:
+
+$$
+\frac{1}{\binom{N}{M}}\frac{\binom{N}{M}M}{N}\sum_{i=1}^N(Y_i(T)-Y_i(C))^2=\frac{M}{N}\sum_{i=1}^N(Y_i(T)-Y_i(C))^2
+$$
+
+Notice that the $\frac{\binom{N}{M}M}{N}\sum_{i=1}^N$ is not squared
+because it is simply counting the total number of times each outcome
+appears, the only thing squared is the actual difference in outcomes.
+
+The other part of the sum,
+$\sum_{W\in\Omega(\mathbf{W})}\left[\sum_{i:W_i=1}\sum_{j\neq i:W_i=1}2\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))\right]$,
+is more combinatorially challenging. Here we need to enumerate each of
+the times that every *pair* of distinct $i\neq j$ appears in treatment
+group *together*. Fixing any given $i$ and $j$, there are $M-2$
+remaining treatments that must be distributed between the remaining
+$N-2$ units. So each $i\neq j$ grouping appears in exactly
+$\binom{N-2}{M-2}$ realizations of $\mathbf{W}$.
+
+That portion of the sum reduces to:
+
+$$
+\frac{1}{\binom{N}{M}}\cdot\binom{N-2}{M-2}\cdot2\sum_{i=1}^N\sum_{j> i}\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))
+$$
+
+Noting that
+
+$$
+\frac{\binom{N-2}{M-2}}{\binom{N}{M}}=\frac{\frac{(N-2)!}{(M-2)!((N-2)-(M-2))!}}{\frac{N!}{M!(N-M)!}}=\frac{\frac{1}{1}}{\frac{N\cdot(N-1)}{M\cdot(M-1)}}=\frac{M\cdot(M-1)}{N\cdot(N-1)}
+$$
+
+We have:
+
+$$
+\frac{M\cdot(M-1)}{N\cdot(N-1)}\cdot2\sum_{i=1}^N\sum_{j> i}\cdot(Y_i(T)-Y_i(C))\cdot(Y_j(T)-Y_j(C))
+$$
