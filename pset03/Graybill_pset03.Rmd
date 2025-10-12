@@ -1,0 +1,528 @@
+---
+title: "Problem Set 03"
+author: |
+  Aaron Graybill  
+  Collaborators: John Cho, Thomas Li, Blair Moore
+date: 2025-10-5
+output: 
+  bookdown::pdf_document2:
+    extra_dependencies: ["float", "flafter"]
+    header_includes:
+      - \usepackage{float}
+      - \floatplacement{table}{H}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+If you're having trouble running my code, see
+<https://github.com/aarongraybill/MTGECON_603>. Also the spacing on the tables
+text are really not ideal, Rmarkdown and LaTeX are not playing nicely, sorry about
+that!
+
+```{r, echo=FALSE}
+# don't print code by default
+knitr::opts_chunk$set(echo = FALSE, message = F,tab.pos = "[H]",
+                      fig.pos = "H",fig.align='center',
+                      out.extra = "")
+# force figure positioning
+#knitr::opts_chunk$set()
+```
+
+```{r}
+# Load useful libraries
+library(ggplot2) # making plots
+library(dplyr) # computing sum stats of data frames
+library(tidyr) # converting data from wide to long and vice versa
+```
+
+```{r}
+set.seed(1)
+df <- read.fwf('riverside_2025.txt', 
+               # each column is ten characters wide, there is no header
+               widths = rep(10, 8), header = F,
+               # assign column names
+               col.names = c("treated", "earnings_1", "earnings_4",
+                             "high_school", "female", "age", "young_child",
+                             "single"), 
+               # The last row is blank, so we only read the non-blank rows
+               n = 5419)
+```
+
+```{r hyperparameters}
+B=10000
+```
+
+# Problem 1
+
+## 1.a
+
+The results for parts 1.a through 1.e are summarized in table \@ref(tab:ci-summary-table).
+
+For part 1.a, we can see that vanilla bootstrapped confidence interval for both
+1 and 4 year earnings are significantly larger than zero. Under the assumption
+that the bootstrap distribution is approximately normal under this large of a
+population and large number of bootstrap samples, `r B`, we can be reasonably sure
+that the treatment has a positive effect on the earnings and that is is very
+unlikely to be larger than 2 thousand dollars. 
+
+```{r}
+compute_weighted_test_stat <- function(treated, y, weights=NULL){
+  if (is.null(weights)){
+    weights <- rep(1/length(y), length(y))
+  }
+  treated_avg <- sum(treated * weights * y)/sum(treated * weights)
+  control_avg <- sum((1-treated) * weights *y)/sum((1-treated) * weights)
+  
+  return(treated_avg - control_avg)
+}
+
+compute_vanilla_bootstrap_sample <- function(df, M = NULL, replace = T){
+  if (is.null(M)){
+    M <- nrow(df)
+  }
+  
+  df[sample(1:nrow(df), size = M, replace = replace),]
+}
+
+bootstrap_results_vanilla <- 
+  lapply(1:B, function(b){
+  b_df <- compute_vanilla_bootstrap_sample(df)
+  data.frame(
+    method = 'vanilla',
+    B = b,
+    test_stat_1=compute_weighted_test_stat(b_df$treated, b_df$earnings_1),
+    test_stat_4=compute_weighted_test_stat(b_df$treated, b_df$earnings_4)
+  )
+}) |> 
+  bind_rows()
+
+true_test_stat_1 <- compute_weighted_test_stat(df$treated, df$earnings_1)
+true_test_stat_4 <- compute_weighted_test_stat(df$treated, df$earnings_4)
+
+compute_conf_int_using_normal <- function(bootstrap_results, true_test_stat_1, true_test_stat_4, conf = .9){
+  f1 <- (1-conf)/2
+  f2 <- 1-f1
+  
+  method_in_use = bootstrap_results$method[1]
+  
+  vanilla_bootstrap_variance_1 <- var(bootstrap_results$test_stat_1 - true_test_stat_1)
+  vanilla_bootstrap_variance_4 <- var(bootstrap_results$test_stat_4 - true_test_stat_4)
+  
+  dplyr::tibble(
+    method = method_in_use,
+    variable = "1 Year",
+    true_test_stat = true_test_stat_1,
+    lb = true_test_stat_1+qnorm(f1)*sqrt(vanilla_bootstrap_variance_1),
+    ub = true_test_stat_1+qnorm(f2)*sqrt(vanilla_bootstrap_variance_1),
+  ) |> 
+    bind_rows(
+      dplyr::tibble(
+    method = method_in_use,
+    variable = "4 Year",
+    true_test_stat = true_test_stat_4,
+    lb = true_test_stat_4+qnorm(f1)*sqrt(vanilla_bootstrap_variance_4),
+    ub = true_test_stat_4+qnorm(f2)*sqrt(vanilla_bootstrap_variance_4),
+  )
+    )
+}
+
+vanilla_summary <- compute_conf_int_using_normal(bootstrap_results_vanilla, true_test_stat_1, true_test_stat_4)
+
+```
+
+## 1.b.
+
+The problem set only asks for bootstrap weights generated from the exponential
+distribution, but for my interest, I also generated Dirichlet weights where
+each of the bootstrap samples draws one realization from a Dirichlet distribution with 
+parameter: $\alpha = (1-(1/N),\ldots, 1-(1/N))$. Where $N$ is the total number of 
+units. I then multiply these draws by
+$N$ so that their sum is $N$. The $1-(1/N)$ is to ensure that the variance of
+any individual observation matches the binomial variance of $1-(1/N)$, though I'll
+omit the proof of this.
+
+The confidence intervals from both the exponential and Dirichlet Bayesian bootstrap
+are quite similar to the vanilla bootstrap. So the interpretation is essentially
+identical. Any differences between the confidence intervals may simply be due
+to differences in realizations of the random sampling or due to slight differences
+in the nature of the estimator. Though it's tough to distinguish these effects
+in our context.
+
+```{r}
+bootstrap_results_exponential <- 
+  lapply(1:B, function(b){
+  weights <- rexp(nrow(df), rate = 1)
+  weights <- weights/sum(weights)
+  data.frame(
+    method = 'bayesian_exponential',
+    B = b,
+    test_stat_1=compute_weighted_test_stat(df$treated, df$earnings_1, weights),
+    test_stat_4=compute_weighted_test_stat(df$treated, df$earnings_4, weights)
+  )
+}) |> 
+  bind_rows()
+
+bootstrap_results_dirichlet <- 
+  lapply(1:B, function(b){
+    N = nrow(df)
+    # For reasons I omit, this is the correct scaling for alpha vector parameter
+    # for large Ns, it's effectively just 1 anyway
+    alpha=1-(1/N)
+    # we mutliply by N so that the sum is N
+    weights= N*gtools::rdirichlet(1, alpha*rep(1, N))[1,]
+  data.frame(
+    method = 'bayesian_dirichlet',
+    B = b,
+    test_stat_1=compute_weighted_test_stat(df$treated, df$earnings_1, weights),
+    test_stat_4=compute_weighted_test_stat(df$treated, df$earnings_4, weights)
+  )
+}) |> 
+  bind_rows()
+
+bayesian_exponential_summary <- compute_conf_int_using_normal(bootstrap_results_exponential, true_test_stat_1, true_test_stat_4)
+bayesian_dirichlet_summary <- compute_conf_int_using_normal(bootstrap_results_dirichlet, true_test_stat_1, true_test_stat_4)
+```
+
+## 1.c.
+
+```{r}
+
+# I don't need to do var(x- E[x]) bc that always equals var(x)
+se_vanilla_1 <- sqrt(var(bootstrap_results_vanilla$test_stat_1))
+se_vanilla_4 <- sqrt(var(bootstrap_results_vanilla$test_stat_4))
+t_stats_1 <- (bootstrap_results_vanilla$test_stat_1-true_test_stat_1)/se_vanilla_1
+t_stats_4 <- (bootstrap_results_vanilla$test_stat_4-true_test_stat_4)/se_vanilla_4
+
+# unname here is just removing the index names in the vector
+t_stat_quantiles_1 <- quantile(t_stats_1, c(.05,.95)) |> unname()
+t_stat_quantiles_4 <- quantile(t_stats_4, c(.05,.95)) |> unname()
+
+compute_empirical_variance <- function(y){
+  # here we divide by length of the vector minus explicitly
+  (1/(length(y)-1)) * sum((y - mean(y))^2)
+}
+
+compute_neyman_variance <- function(y, treated){
+  # compute the conservative Neyman variance
+  N <- length(y)
+  M <- sum(treated)
+  y_treated <- y[treated == 1]
+  y_control <- y[treated == 0]
+  S_T <- compute_empirical_variance(y_treated)
+  S_C <- compute_empirical_variance(y_control)
+  return((S_T/(M)) + (S_C/(N-M)))
+}
+
+neyman_se_1 <- sqrt(compute_neyman_variance(df$earnings_1, df$treated))
+neyman_se_4 <- sqrt(compute_neyman_variance(df$earnings_4, df$treated))
+
+tstat_dist_summary <- bind_rows(
+  data.frame(
+    method = "boot_t_stat",
+    variable = "1 Year",
+    true_test_stat =  true_test_stat_1,
+    lb = true_test_stat_1 - (t_stat_quantiles_1[2] * neyman_se_1),
+    ub = true_test_stat_1 - (t_stat_quantiles_1[1] * neyman_se_1)
+  ),
+  data.frame(
+    method = "boot_t_stat",
+    variable = "4 Year",
+    true_test_stat = true_test_stat_4,
+    lb = true_test_stat_4 - (t_stat_quantiles_4[2] * neyman_se_4),
+    ub = true_test_stat_4 - (t_stat_quantiles_4[1] * neyman_se_4)
+  )
+)
+
+
+```
+
+We can also bootstrap the $t$-statistic instead of the actual estimated treatment
+effect. In this case, the effect is pretty minimal, the confidence interval is
+qualitatively identical. That said, if the estimator was much less normally distributed,
+we might expect the $t$-state to better capture the significance of the results.
+
+For one-year earnings, I estimated the 5th and 95th percentiles of the $t$ distribution
+to be: `r t_stat_quantiles_1`. For four-year earnings, I estimated the 5th and
+95th percentiles of the $t$ distribution to be: `r t_stat_quantiles_4`
+
+Here, the significance of the results requires slightly different interpretation.
+Here, we are saying that we are 90% confident that the $t$-statistic is in the 
+range specified in \@ref(tab:ci-summary-table). So we have strong evidence to believe
+that the centered and rescaled variable is significantly different from zero
+and lies in the specified range.
+
+## 1.d.
+
+In this section, I compute the confidence intervals from a bootstrapped
+`r round(sqrt(nrow(df)))` unit without-replacement sample from the empirical
+distribution. Here, the confidence intervals for both variables are very
+modestly wider, reflecting the additional variation in smaller samples, although
+the overall effect is small. The interpretation of the confidence intervals
+is still the same as in the previous sections.
+
+
+```{r}
+bootstrap_results_subsample <- 
+  lapply(1:B, function(b){
+    M <- round(sqrt(nrow(df)))
+  b_df <- compute_vanilla_bootstrap_sample(df, M=M, replace = F)
+  data.frame(
+    method = 'subsample',
+    B = b,
+    test_stat_1=compute_weighted_test_stat(b_df$treated, b_df$earnings_1),
+    test_stat_4=compute_weighted_test_stat(b_df$treated, b_df$earnings_4)
+  )
+}) |> 
+  bind_rows()
+
+compute_conf_int_using_normal_subsample <- function(bootstrap_results, true_test_stat_1, true_test_stat_4, M, N){
+  method_in_use = bootstrap_results$method[1]
+  
+  vanilla_bootstrap_variance_1 <- M/N*var(bootstrap_results$test_stat_1 - true_test_stat_1)
+  vanilla_bootstrap_variance_4 <- M/N*var(bootstrap_results$test_stat_4 - true_test_stat_4)
+  
+  dplyr::tibble(
+    method = method_in_use,
+    variable = "1 Year",
+    true_test_stat = true_test_stat_1,
+    lb = true_test_stat_1+qnorm(.05)*sqrt(vanilla_bootstrap_variance_1),
+    ub = true_test_stat_1+qnorm(.95)*sqrt(vanilla_bootstrap_variance_1),
+  ) |> 
+    bind_rows(
+      dplyr::tibble(
+    method = method_in_use,
+    variable = "4 Year",
+    true_test_stat = true_test_stat_4,
+    lb = true_test_stat_4+qnorm(.05)*sqrt(vanilla_bootstrap_variance_4),
+    ub = true_test_stat_4+qnorm(.95)*sqrt(vanilla_bootstrap_variance_4),
+  )
+    )
+}
+
+subsample_summary <- compute_conf_int_using_normal_subsample(bootstrap_results_subsample,
+                                                             true_test_stat_1, true_test_stat_4,
+                                                             round(sqrt(nrow(df))), nrow(df))
+```
+
+## 1.e.
+
+For the custom bootstrap test, I have elected to use the difference in stratum
+means weighted by stratum size. This is the same metric discussed in question 2.
+This is a natural estimator because it allows us to control for between-stratum
+variation without imposing parametric assumptions on the relationship between
+high school completion and earnings. So in each iteration of the bootstrap, 
+I randomly draw $N$ rows from the original data with replacement. Then I split
+the data by highschool completion, then I compute the difference in means for
+treated and untreated units in those draws. To compute the test statistic, I 
+take the weighted average of those differences in means, weighted by the number
+of units in that stratum for that bootstrap iteration. So the weights vary
+by the actual draws from the bootstrap.
+
+To compute the 95% confidence interval,
+I follow parts 1a, 1b, and 1e in which I compute the compute the value of the
+test statistic in each of the bootstrap draws, then compute the empirical 
+standard error across each of those bootstrap draws. To be precise, I compute 
+$$
+\sqrt{\frac{1}{B-1}\sum_{b=1}^B(\hat\tau^b_{strat}-\hat\tau_{strat})^2}
+$$
+where $B$ is the number of bootstraps, $\hat\tau_{strat}$ is the value of the 
+test statistic on the original data, and $\hat\tau^b_{strat}$ is the value of the
+test statistic for each draw from the bootstrap distribution. To compute the 
+confidence interval, I used those standard errors, multiplied them by the 5th and
+95th percentiles for a standard normal distribution, and added those to $\hat\tau_{strat}$.
+
+Here the 95% confidence
+interval is wider than in previous questions. That is mostly mechanical, 95% confidence
+intervals must be wider than 90% confidence intervals given the same distribution.
+
+That said, the distribution of the test statistics should not be exactly identical
+under this new stratum level estimator. However, it turns out to be almost exactly
+the same as previous questions. Figure \@ref(fig:bootstrap-densities) plots kernel density estimates of the distributions
+of the test statistics under the various bootstrap regimes. The main takeaway is
+the subsampling approach introduces much more variation, that's mostly mechanical
+and is compensated for when computing confidence intervals. Otherwise, each of
+the methods produces nearly identical distributions of test statistics.
+
+```{r}
+treated <- df$treated
+y <- df$earnings_4
+group <- df$high_school
+compute_t_strat <- function(treated, y, group){
+  # this function is a bit extra bc it's actually allowing for an arbitrary
+  # number of groups
+  treated_groups <- split(treated, group)
+  y_groups <- split(y, group)
+  
+  # compute number of obs in each group
+  group_sizes <- sapply(y_groups, length)
+  # for each group, compute its estimated ATE
+  group_effects <- mapply(compute_weighted_test_stat,treated_groups, y_groups)
+  
+  t_strat = sum(group_sizes * group_effects)/length(y)
+  
+  return(t_strat)
+}
+
+bootstrap_results_custom <- 
+  lapply(1:B, function(b){
+  b_df <- compute_vanilla_bootstrap_sample(df)
+  data.frame(
+    method = 'custom',
+    B = b,
+    unconditional_test_stat_1=compute_weighted_test_stat(b_df$treated, b_df$earnings_1),
+    test_stat_1=compute_t_strat(b_df$treated, b_df$earnings_1, b_df$high_school),
+    unconditional_test_stat_4=compute_weighted_test_stat(b_df$treated, b_df$earnings_4),
+    test_stat_4=compute_t_strat(b_df$treated, b_df$earnings_4, b_df$high_school)
+  )
+}) |> 
+  bind_rows()
+
+true_t_strat_1 <- compute_t_strat(df$treated, df$earnings_1, df$high_school)
+true_t_strat_4 <- compute_t_strat(df$treated, df$earnings_4, df$high_school)
+
+custom_summary <- compute_conf_int_using_normal(bootstrap_results_custom, true_t_strat_1, true_t_strat_4, conf = .95)
+```
+
+
+```{r ci-summary-table, tab.cap="Confidence intervals from various bootstraps. All reports, except for custom are 90 percent confidence intervals. The custom confidence interval is 95 percent."}
+t <- bind_rows(
+  vanilla_summary,
+  bayesian_exponential_summary,
+  bayesian_dirichlet_summary,
+  tstat_dist_summary,
+  subsample_summary,
+  custom_summary
+) 
+
+#if (interactive()){
+#  t
+#} else{
+  knitr::kable(t)
+#}
+```
+
+```{r bootstrap-densities, fig.cap="Kernel densities of bootstrapped test statistics under various bootstrap methodology."}
+bind_rows(
+  bootstrap_results_vanilla, bootstrap_results_exponential,
+  bootstrap_results_dirichlet, bootstrap_results_subsample,
+  bootstrap_results_custom) |> 
+  ggplot()+
+  geom_density(aes(x=test_stat_1, col = method))+
+  geom_vline(aes(xintercept = true_test_stat_1))+
+  coord_cartesian(xlim = c(0,3))
+```
+
+
+# Problem 2
+
+## 2.a
+
+I would probably advocate for the stratified analysis. While we don't have information
+on the dependent variable, I will assume that this is a dependent variable that
+is correlated with age---a common feature in a variety of social science contexts. 
+In this case, the post-hoc stratified estimation should have a lower expected 
+variance than the unstratified version because it is able to account for the
+between-age variance in the dependent variables in a way that the unstratified
+analysis does not. That said, since the number of observations is relatively small,
+if age is not correlated with the outcome, the post-hoc stratification may
+add additional variance to the estimator.
+
+## 2.b
+
+We've already shown in lecture that the difference in sample treated and control
+means is an unbiased estimator for the average treatment effect. But here's a 
+quick re-derivation. First note that when we're not conditioning on the number of treated in each group, we know that $\mathbb{E}[W_i]=\frac{M}{N}$. Using that we have
+
+$$
+\begin{aligned}
+\mathbb{E}[\hat\tau_{dif}-\tau]&=\mathbb{E}[\tau_{dif}-\tau]\\
+&=\mathbb{E}[\hat\tau_{dif}]-\mathbb{E}[\tau] \\
+&=\mathbb{E}[\hat\tau_{dif}]-\tau \\
+&=\mathbb{E}[\hat\tau_{dif}]- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=\mathbb{E}\left[\frac{1}{M}\sum_{i=1}^NW_iY_i(T)-\frac{1}{N-M}\sum_{i=1}^N(1-W_i)Y_i(C)\right]- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=\left(\frac{1}{M}\sum_{i=1}^N\mathbb{E}[W_iY_i(T)]-\frac{1}{N-M}\sum_{i=1}^N\mathbb{E}[(1-W_i)Y_i(C)]\right)- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=\left(\frac{1}{M}\sum_{i=1}^N\mathbb{E}[W_i]Y_i(T)-\frac{1}{N-M}\sum_{i=1}^N\mathbb{E}[(1-W_i)]Y_i(C)\right)- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=\left(\frac{1}{M}\sum_{i=1}^N\frac{M}{N}Y_i(T)-\frac{1}{N-M}\sum_{i=1}^N\frac{N-M}{N}Y_i(C)\right)- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=\left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right)- \left(\frac{1}{N}\sum_{i=1}^N
+Y_i(T) - \frac{1}{N}\sum_{i=1}^N
+Y_i(C)\right) \\
+&=0
+\end{aligned}
+$$
+Now we can show that the (weighted) aggregate of the difference
+in means by strata, $\tau_{strat}$ is an unbiased estimator for $\tau$. I think
+the easiest way to approach this is by conditioning on the number of old and young
+assignments. So denote $N_O+N_Y=N$ to be the old and young total populations respectively.
+Next denote, $\tilde M_O,\tilde M_Y$ as the stochastic number of treated units for old and
+young respectively (this is stochastic since we're doing post-hoc stratificiation).
+
+Notice however, that $N_O,N_Y$ are not stochastic and that $\tilde M_O+\tilde M_Y=M$
+is not stochastic (in our specific case, there are always 50 treated, only the
+breakdown of old versus young is stochastic). Further dentoe $A_i$ to be the non-stochastic indicator for whether or not a unit is old. $A_i=1$ implies that unit $i$ is old.
+Conditioning on specific values of
+$\tilde M_O,\tilde M_Y,A_i$ we see that:
+
+$$
+\mathbb{E}[W_i|\tilde M_O= M_O, \tilde M_Y = M_Y, A_i=1]=\frac{\binom{N_O-1}{M_O-1}\binom{N_Y}{M_Y}}{\binom{N_O}{M_O}\binom{N_Y}{M_Y}}=\frac{M_O}{N_O}
+$$
+
+The denominator in the intermediate fraction is the total number of ways to choose
+the $M_O$ treated old individuals from the $N_O$ options multiplied by each of the
+ways to do the same for the young person. For the numerator, we have number of ways
+to choose the remaining $M_O-1$ treatments from the other $N_O-1$ mutliplied by
+the same amount of combinations from the young individuals since their combinations
+are not affected by whether or not a specific old person is treated or untreated
+(once you've conditioned on $M_Y$).
+
+Similarly, for a young unit we have:
+
+$$
+\mathbb{E}[W_i|\tilde M_O= M_O, \tilde M_Y = M_Y, A_i=0]=\frac{\binom{N_O}{M_O}\binom{N_Y-1}{M_Y-1}}{\binom{N_O}{M_O}\binom{N_Y}{M_Y}}=\frac{M_Y}{N_Y}
+$$
+
+Linearity of expectations or more combinatorics gives: $\mathbb{E}[(1-W_i)|\tilde M_O= M_O, \tilde M_Y = M_Y, A_i=1]=\frac{N_O-M_O}{N_O}$ and $\mathbb{E}[(1-W_i)|\tilde M_O= M_O, \tilde M_Y = M_Y, A_i=0]=\frac{N_Y-M_Y}{N_Y}$
+
+Now we proceed to compute $\mathbb{E}[\hat\tau_{strat} -\tau]$ using the law of
+total expectation. Law of total expectation gives that $\mathbb{E}[\hat\tau_{strat} -\tau]=\mathbb{E}[\mathbb{E}[\hat\tau_{strat} -\tau|M_O,M_Y]]$. If every interior
+expectation is zero, then it must be that the outer expectation is zero, so if 
+we can show that $\mathbb{E}[\hat\tau_{strat} -\tau|M_O,M_Y]=0$ for all $M_O,M_Y$,
+then we know that the estimator is unbiased unconditionally. We proceed as follows:
+
+$$
+\begin{aligned}
+\mathbb{E}[\hat\tau_{strat} -\tau|M_O,M_Y]&=
+\mathbb{E}\left[
+\left(\frac{N_O}{N}\left(\frac{1}{M_O}\sum_{A_i=1}W_iY_i(T)-\frac{1}{N_O-M_O}\sum_{A_i=1}(1-W_i)Y_i(C)\right) + \right.\right. \\
+ & \quad \left. \left.\frac{N_Y}{N}\left(\frac{1}{M_Y}\sum_{A_i=0}W_iY_i(T)-\frac{1}{N_Y-M_Y}\sum_{i=0}(1-W_i)Y_i(C)\right)\right)  - \right. \\
+ & \quad \left. \left(\frac{1}{N}\sum_{i=1}^N Y_i(T) - \frac{1}{N}\sum_{i=1}^N\right) | M_O, M_Y\right]\\
+ &=
+\left(\frac{N_O}{N}\left(\frac{1}{M_O}\sum_{A_i=1}\mathbb{E}[W_iY_i(T)|M_O, M_Y,A_i=1]-\frac{1}{N_O-M_O}\sum_{A_i=1}\mathbb{E}[(1-W_i)Y_i(C)|M_O, M_Y,A_i=1]\right) + \right. \\
+ & \quad \left. \left.\frac{N_Y}{N}\left(\frac{1}{M_Y}\sum_{A_i=0}\mathbb{E}[W_iY_i(T)|M_O, M_Y,A_i=0]-\frac{1}{N_Y-M_Y}\sum_{A_i=0}\mathbb{E}[(1-W_i)Y_i(C)|M_O, M_Y,A_i=0]\right)\right)  - \right. \\
+ & \quad \left(\frac{1}{N}\sum_{i=1}^N Y_i(T) - \frac{1}{N}\sum_{i=1}^N\right) \\
+  &=
+\left(\frac{N_O}{N}\left(\frac{1}{M_O}\sum_{A_i=1}\frac{M_O}{N_O}Y_i(T)-\frac{1}{N_O-M_O}\sum_{A_i=1}\frac{N_O-M_O}{N_O}Y_i(C)\right) + \right. \\
+ & \quad \left. \left.\frac{N_Y}{N}\left(\frac{1}{M_Y}\sum_{A_i=0}\frac{M_Y}{N_Y}Y_i(T)-\frac{1}{N_Y-M_Y}\sum_{A_i=0}\frac{N_Y-M_Y}{N_Y}Y_i(C)\right)\right)  - \right. \\
+ & \quad \left(\frac{1}{N}\sum_{i=1}^N Y_i(T) - \frac{1}{N}\sum_{i=1}^N\right) \\
+   &=
+\left(\frac{1}{N}\left(\sum_{A_i=1}Y_i(T)-\sum_{A_i=1}Y_i(C)\right) + \right. \\
+ & \quad \left. \left.\frac{1}{N}\left(\sum_{A_i=0}Y_i(T)-\sum_{A_i=0}Y_i(C)\right)\right)  - \right. \\
+ & \quad \left(\frac{1}{N}\sum_{i=1}^N Y_i(T) - \frac{1}{N}\sum_{i=1}^N\right) \\
+    &=
+\left(\frac{1}{N}\sum_{i=1}^NY_i(T)-\frac{1}{N}\sum_{i=1}^NY_i(C)\right)  -  \\
+ & \quad \left(\frac{1}{N}\sum_{i=1}^N Y_i(T) - \frac{1}{N}\sum_{i=1}^N\right) \\
+ &= 0
+\end{aligned}
+$$
